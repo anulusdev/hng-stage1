@@ -1,152 +1,50 @@
-from django.http import JsonResponse
-from django.views import View
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
+from rest_framework.exceptions import ValidationError
+from django_filters.rest_framework import DjangoFilterBackend
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
-import requests
-import json
+
 from .models import Profile
-
-
-def fetch_profile_data(name):
-    results = {}
-
-    try:
-        r = requests.get(
-            'https://api.genderize.io',
-            params={'name': name},
-            timeout=5
-        )
-        r.raise_for_status()
-        data = r.json()
-
-        if not data.get('gender') or data.get('count', 0) == 0:
-            return None, 'Genderize'
-
-        results['gender'] = data['gender']
-        results['gender_probability'] = data['probability']
-        results['sample_size'] = data['count']
-
-    except requests.exceptions.RequestException:
-        return None, 'Genderize'
-
-    try:
-        r = requests.get(
-            'https://api.agify.io',
-            params={'name': name},
-            timeout=5
-        )
-        r.raise_for_status()
-        data = r.json()
-
-        if data.get('age') is None:
-            return None, 'Agify'
-
-        age = data['age']
-        results['age'] = age
-
-        if age <= 12:
-            results['age_group'] = 'child'
-        elif age <= 19:
-            results['age_group'] = 'teenager'
-        elif age <= 59:
-            results['age_group'] = 'adult'
-        else:
-            results['age_group'] = 'senior'
-
-    except requests.exceptions.RequestException:
-        return None, 'Agify'
-
-    try:
-        r = requests.get(
-            'https://api.nationalize.io',
-            params={'name': name},
-            timeout=5
-        )
-        r.raise_for_status()
-        data = r.json()
-
-        countries = data.get('country', [])
-        if not countries:
-            return None, 'Nationalize'
-
-        top_country = max(countries, key=lambda x: x['probability'])
-        results['country_id'] = top_country['country_id']
-        results['country_probability'] = top_country['probability']
-
-    except requests.exceptions.RequestException:
-        return None, 'Nationalize'
-
-    return results, None
-
-
-def format_profile(profile, full=True):
-    if full:
-        return {
-            'id': str(profile.id),
-            'name': profile.name,
-            'gender': profile.gender,
-            'gender_probability': profile.gender_probability,
-            'sample_size': profile.sample_size,
-            'age': profile.age,
-            'age_group': profile.age_group,
-            'country_id': profile.country_id,
-            'country_probability': profile.country_probability,
-            'created_at': profile.created_at.strftime('%Y-%m-%dT%H:%M:%SZ')
-        }
-    else:
-        return {
-            'id': str(profile.id),
-            'name': profile.name,
-            'gender': profile.gender,
-            'age': profile.age,
-            'age_group': profile.age_group,
-            'country_id': profile.country_id,
-        }
+from .serializers import ProfileCreateSerializer, ProfileSerializer
+from .filters import ProfileFilter
+from .pagination import ProfilePagination
+from .ordering import SeparateParamOrderingFilter
+from .services import fetch_profile_data, parse_natural_language_query
 
 
 @method_decorator(csrf_exempt, name='dispatch')
-class ProfileListView(View):
+class ProfileListView(APIView):
+    """
+    POST /api/profiles  → create profile
+    GET  /api/profiles  → list with filtering, sorting, pagination
+    """
+
+    filter_backends = [DjangoFilterBackend, SeparateParamOrderingFilter]
+    filterset_class = ProfileFilter
+    ordering_fields = ['age', 'created_at', 'gender_probability']
 
     def post(self, request):
-        try:
-            body = json.loads(request.body)
-        except json.JSONDecodeError:
-            return JsonResponse(
-                {'status': 'error', 'message': 'Invalid JSON body'},
-                status=400
-            )
+        serializer = ProfileCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
 
-        name = body.get('name', '')
-
-        if not name or not str(name).strip():
-            return JsonResponse(
-                {'status': 'error', 'message': 'name is required'},
-                status=400
-            )
-
-        if not isinstance(name, str):
-            return JsonResponse(
-                {'status': 'error', 'message': 'name must be a string'},
-                status=422
-            )
-
-        name = name.strip().lower()
+        name = serializer.validated_data['name']
 
         existing = Profile.objects.filter(name=name).first()
         if existing:
-            return JsonResponse({
+            return Response({
                 'status': 'success',
                 'message': 'Profile already exists',
-                'data': format_profile(existing)
-            }, status=200)
+                'data': ProfileSerializer(existing).data
+            }, status=status.HTTP_200_OK)
 
         data, failed_api = fetch_profile_data(name)
-
         if data is None:
-            return JsonResponse({
+            return Response({
                 'status': '502',
                 'message': f'{failed_api} returned an invalid response'
-            }, status=502)
+            }, status=status.HTTP_502_BAD_GATEWAY)
 
         profile = Profile.objects.create(
             name=name,
@@ -156,62 +54,114 @@ class ProfileListView(View):
             age=data['age'],
             age_group=data['age_group'],
             country_id=data['country_id'],
-            country_probability=data['country_probability']
+            country_name=data['country_name'],
+            country_probability=data['country_probability'],
         )
 
-        return JsonResponse({
+        return Response({
             'status': 'success',
-            'data': format_profile(profile)
-        }, status=201)
+            'data': ProfileSerializer(profile).data
+        }, status=status.HTTP_201_CREATED)
 
     def get(self, request):
         queryset = Profile.objects.all()
 
-        gender = request.GET.get('gender')
-        country_id = request.GET.get('country_id')
-        age_group = request.GET.get('age_group')
+        for backend in self.filter_backends:
+            queryset = backend().filter_queryset(request, queryset, self)
 
-        if gender:
-            queryset = queryset.filter(gender__iexact=gender)
-        if country_id:
-            queryset = queryset.filter(country_id__iexact=country_id)
-        if age_group:
-            queryset = queryset.filter(age_group__iexact=age_group)
+        paginator = ProfilePagination()
+        page = paginator.paginate_queryset(queryset, request)
 
-        profiles = [format_profile(p, full=False) for p in queryset]
+        if page is not None:
+            serializer = ProfileSerializer(page, many=True)
+            return paginator.get_paginated_response(serializer.data)
 
-        return JsonResponse({
+        serializer = ProfileSerializer(queryset, many=True)
+        return Response({
             'status': 'success',
-            'count': len(profiles),
-            'data': profiles
-        }, status=200)
+            'count': queryset.count(),
+            'data': serializer.data
+        })
 
 
 @method_decorator(csrf_exempt, name='dispatch')
-class ProfileDetailView(View):
+class ProfileDetailView(APIView):
+    """
+    GET    /api/profiles/{id} → retrieve single profile
+    DELETE /api/profiles/{id} → delete profile
+    """
 
     def get(self, request, profile_id):
         try:
             profile = Profile.objects.get(id=profile_id)
         except Profile.DoesNotExist:
-            return JsonResponse(
+            return Response(
                 {'status': 'error', 'message': 'Profile not found'},
-                status=404
+                status=status.HTTP_404_NOT_FOUND
             )
-
-        return JsonResponse({
+        return Response({
             'status': 'success',
-            'data': format_profile(profile)
-        }, status=200)
+            'data': ProfileSerializer(profile).data
+        })
 
     def delete(self, request, profile_id):
         try:
             profile = Profile.objects.get(id=profile_id)
         except Profile.DoesNotExist:
-            return JsonResponse(
+            return Response(
                 {'status': 'error', 'message': 'Profile not found'},
-                status=404
+                status=status.HTTP_404_NOT_FOUND
+            )
+        profile.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+class ProfileSearchView(APIView):
+    """
+    GET /api/profiles/search?q=young males from nigeria
+
+    Parses natural language → filters dict → same queryset pipeline.
+    Supports page and limit params for pagination.
+    """
+
+    def get(self, request):
+        q = request.GET.get('q', '').strip()
+
+        if not q:
+            return Response(
+                {'status': 'error', 'message': 'q parameter is required'},
+                status=status.HTTP_400_BAD_REQUEST
             )
 
-        profile.delete()
-        return JsonResponse({}, status=204)
+        filters, error = parse_natural_language_query(q)
+        if error:
+            return Response(
+                {'status': 'error', 'message': error},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        queryset = Profile.objects.all()
+        filterset = ProfileFilter(filters, queryset=queryset)
+        if not filterset.is_valid():
+            return Response(
+                {'status': 'error', 'message': 'Invalid query parameters'},
+                status=status.HTTP_422_UNPROCESSABLE_ENTITY
+            )
+        queryset = filterset.qs
+
+        paginator = ProfilePagination()
+        page = paginator.paginate_queryset(queryset, request)
+
+        if page is not None:
+            serializer = ProfileSerializer(page, many=True)
+            return paginator.get_paginated_response(serializer.data)
+
+        serializer = ProfileSerializer(queryset, many=True)
+        return Response({
+            'status': 'success',
+            'page': 1,
+            'limit': 10,
+            'total': queryset.count(),
+            'data': serializer.data
+        })
