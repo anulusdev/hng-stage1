@@ -10,6 +10,7 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
+from datetime import timedelta
 from pathlib import Path
 import dj_database_url
 from dotenv import load_dotenv
@@ -25,15 +26,28 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = "django-insecure-ay+1fj9uk@3$nkp$jxpt_9!$a5cs89qm)te84j3)2%71^owudr"
+SECRET_KEY = os.environ.get('SECRET_KEY')
+GITHUB_WEB_CLIENT_ID = os.environ.get('WEB_GITHUB_CLIENT_ID')
+GITHUB_WEB_CLIENT_SECRET = os.environ.get('WEB_GITHUB_CLIENT_SECRET')
+GITHUB_WEB_CALLBACK_URL = os.environ.get(
+    'WEB_GITHUB_CALLBACK_URL',
+    'http://127.0.0.1:8000/auth/github/callback'
+)
+
+GITHUB_CLI_CLIENT_ID = os.environ.get('CLI_GITHUB_CLIENT_ID')
+GITHUB_CLI_CLIENT_SECRET = os.environ.get('CLI_GITHUB_CLIENT_SECRET')
+GITHUB_CLI_CALLBACK_URL = os.environ.get(
+    'CLI_GITHUB_CALLBACK_URL',
+    'http://localhost:8888/callback'
+)
+FRONTEND_URL = os.environ.get('FRONTEND_URL', 'http://127.0.0.1:8001')
+
+COOKIE_SECURE = os.environ.get('COOKIE_SECURE', 'False') == 'True'
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
 ALLOWED_HOSTS = ['*']
-
-
-# Application definition
 
 INSTALLED_APPS = [ 
     "corsheaders",
@@ -44,11 +58,16 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "rest_framework",
+    'rest_framework_simplejwt',
+    'rest_framework_simplejwt.token_blacklist',
     "profiles",
     'django_filters',
+    'users', 
 ]
 
 MIDDLEWARE = [
+    'main.middleware.APIVersionMiddleware',
+    'main.middleware.RequestLoggingMiddleware',
     "corsheaders.middleware.CorsMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.middleware.security.SecurityMiddleware",
@@ -80,6 +99,27 @@ TEMPLATES = [
 WSGI_APPLICATION = "main.wsgi.application"
 
 
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'standard': {
+            'format': '[{asctime}] {levelname} {name}: {message}',
+            'style': '{',
+        },
+    },
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+            'formatter': 'standard',
+        },
+    },
+    'root': {
+        'handlers': ['console'],
+        'level': 'INFO',
+    },
+}
+
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
@@ -100,6 +140,8 @@ DATABASES = {
 # Password validation
 # https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators
 
+AUTH_USER_MODEL = 'users.User'
+
 AUTH_PASSWORD_VALIDATORS = [
     {
         "NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator",
@@ -115,11 +157,44 @@ AUTH_PASSWORD_VALIDATORS = [
     },
 ]
 
+
 REST_FRAMEWORK = {
     'EXCEPTION_HANDLER': 'main.exceptions.custom_exception_handler',
     'DEFAULT_FILTER_BACKENDS': [
         'django_filters.rest_framework.DjangoFilterBackend',
     ],
+    'DEFAULT_AUTHENTICATION_CLASSES': [
+        'users.authentication.CookieOrHeaderJWTAuthentication',
+    ],
+    'DEFAULT_PERMISSION_CLASSES': [
+        'rest_framework.permissions.IsAuthenticated',
+    ],
+    'DEFAULT_THROTTLE_CLASSES': [
+        'rest_framework.throttling.ScopedRateThrottle',
+    ],
+    'DEFAULT_THROTTLE_RATES': {
+        'auth': '10/minute',  # 10 requests per minute for Auth endpoints
+        'api': '60/minute'    # 60 requests per minute for Profile endpoints
+    }
+}
+
+SIMPLE_JWT = {
+    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=3),
+
+    'REFRESH_TOKEN_LIFETIME': timedelta(minutes=5),
+
+    'ROTATE_REFRESH_TOKENS': True,
+
+    'BLACKLIST_AFTER_ROTATION': True,
+
+    'ALGORITHM': 'HS256',
+
+    'SIGNING_KEY': SECRET_KEY,
+
+    'USER_ID_FIELD': 'id',
+    'USER_ID_CLAIM': 'user_id',
+
+    'AUTH_TOKEN_CLASSES': ('rest_framework_simplejwt.tokens.AccessToken',),
 }
 
 # Internationalization
