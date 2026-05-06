@@ -155,48 +155,31 @@ class ProfileSearchView(BaseProfileView):
         return Response({'status': 'success', 'page': 1, 'limit': 10, 'total': filterset.qs.count(), 'data': serializer.data})
 
 
-class ProfileExportView(BaseProfileView):
-    """
-    GET /api/profiles/export?format=csv
-    Applies filters/sorting and returns a CSV file.
-    """
-    permission_classes = [IsAuthenticated, IsActiveUser, IsAnalystOrAdmin]
-    filter_backends = [DjangoFilterBackend, SeparateParamOrderingFilter]
-    filterset_class = ProfileFilter
-    ordering_fields = ['age', 'created_at', 'gender_probability']
+class ProfileExportView(APIView):
+    permission_classes = [IsAuthenticated]
 
-    def get(self, request):
-        if request.GET.get('format') != 'csv':
-            return Response(
-                {"status": "error", "message": "Only format=csv is supported"}, 
-                status=status.HTTP_400_BAD_REQUEST
-            )
+    def get(self, request, *args, **kwargs):
+        # 1. Grab all profiles (you can add your filters back later if needed)
+        gender = request.GET.get('gender')
+        profiles = Profile.objects.all()
+        if gender:
+            profiles = profiles.filter(gender=gender)
 
-        # Apply same filtering/sorting as ProfileListView so the CSV matches what the user searched for
-        queryset = Profile.objects.all()
-        for backend in self.filter_backends:
-            queryset = backend().filter_queryset(request, queryset, self)
-
-        # Tell the browser this is a CSV file download, not a webpage
+        # 2. Create the CSV Response
         response = HttpResponse(content_type='text/csv')
-        timestamp = timezone.now().strftime("%Y%m%d%H%M%S")
-        response['Content-Disposition'] = f'attachment; filename="profiles_{timestamp}.csv"'
+        response['Content-Disposition'] = 'attachment; filename="profiles_export.csv"'
 
+        # 3. Write the data
         writer = csv.writer(response)
+        writer.writerow(['id', 'name', 'gender', 'age', 'country_name'])
         
-        # Write the Column Headers
-        writer.writerow([
-            'id', 'name', 'gender', 'gender_probability', 'age', 
-            'age_group', 'country_id', 'country_name', 
-            'country_probability', 'created_at'
-        ])
-
-        # Write data rows
-        for profile in queryset:
+        for profile in profiles:
             writer.writerow([
-                str(profile.id), profile.name, profile.gender, profile.gender_probability, 
-                profile.age, profile.age_group, profile.country_id, profile.country_name, 
-                profile.country_probability, profile.created_at.strftime('%Y-%m-%dT%H:%M:%SZ')
+                profile.id, 
+                profile.name, 
+                profile.gender, 
+                profile.age, 
+                profile.country_name
             ])
 
         return response
